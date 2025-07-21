@@ -12,11 +12,7 @@ from datetime import date, datetime, timedelta
 import logging
 import json
 import time
-import random
-import numpy as np
-import pandas as pd
 from collections import OrderedDict
-import psutil
 import traceback
 
 # Import configuration
@@ -33,14 +29,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Try to import blpapi, fall back to mock mode if not available
+# Import blpapi - REQUIRED
 try:
     import blpapi
-    BLOOMBERG_AVAILABLE = True
-    logger.info("Bloomberg API (blpapi) is available")
+    logger.info("Bloomberg API (blpapi) loaded successfully")
 except ImportError:
-    BLOOMBERG_AVAILABLE = False
-    logger.warning("Bloomberg API (blpapi) not available - running in mock mode")
+    logger.error("CRITICAL: Bloomberg API (blpapi) not available!")
+    logger.error("Please install: pip install blpapi")
+    raise ImportError("Bloomberg API (blpapi) is required. Please install: pip install blpapi")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -140,19 +136,7 @@ class BloombergConnection:
     def __init__(self):
         self.session = None
         self.service = None
-        self.is_mock = not BLOOMBERG_AVAILABLE or not self._check_bbcomm_running()
-        
-        if self.is_mock:
-            logger.info("Running in mock mode")
-        else:
-            self._connect()
-    
-    def _check_bbcomm_running(self):
-        """Check if Bloomberg Terminal (bbcomm.exe) is running"""
-        for proc in psutil.process_iter(['name']):
-            if proc.info['name'] and 'bbcomm' in proc.info['name'].lower():
-                return True
-        return False
+        self._connect()
     
     def _connect(self):
         """Connect to Bloomberg API"""
@@ -163,7 +147,7 @@ class BloombergConnection:
             
             self.session = blpapi.Session(sessionOptions)
             if not self.session.start():
-                raise Exception("Failed to start Bloomberg session")
+                raise Exception("Failed to start Bloomberg session - ensure Bloomberg Terminal is running")
             
             if not self.session.openService("//blp/refdata"):
                 raise Exception("Failed to open Bloomberg service")
@@ -173,21 +157,17 @@ class BloombergConnection:
             
         except Exception as e:
             logger.error(f"Failed to connect to Bloomberg: {e}")
-            self.is_mock = True
+            raise Exception(f"Bloomberg connection failed: {e}")
     
     def get_historical_data(self, securities, fields, start_date, end_date):
-        """Get historical data from Bloomberg or mock"""
+        """Get historical data from Bloomberg"""
         cache_key = f"hist_{json.dumps(securities)}_{json.dumps(fields)}_{start_date}_{end_date}"
         cached_data = cache.get(cache_key)
         if cached_data:
             logger.info(f"Returning cached data for {cache_key}")
             return cached_data
         
-        if self.is_mock:
-            data = self._generate_mock_historical_data(securities, fields, start_date, end_date)
-        else:
-            data = self._fetch_historical_data(securities, fields, start_date, end_date)
-        
+        data = self._fetch_historical_data(securities, fields, start_date, end_date)
         cache.set(cache_key, data)
         return data
     
@@ -216,24 +196,37 @@ class BloombergConnection:
                     if msg.hasElement("securityData"):
                         security_data = msg.getElement("securityData")
                         security = security_data.getElementAsString("security")
-                        field_data_array = security_data.getElement("fieldData")
                         
-                        data_points = []
-                        for i in range(field_data_array.numValues()):
-                            field_data = field_data_array.getValue(i)
-                            point = {
-                                "date": field_data.getElementAsDatetime("date").date().isoformat()
-                            }
+                        if security_data.hasElement("fieldData"):
+                            field_data_array = security_data.getElement("fieldData")
                             
-                            for field in fields:
-                                if field_data.hasElement(field):
-                                    point[field] = field_data.getElementAsFloat(field)
-                                else:
-                                    point[field] = None
+                            data_points = []
+                            for i in range(field_data_array.numValues()):
+                                field_data = field_data_array.getValue(i)
+                                point = {
+                                    "date": field_data.getElementAsDatetime("date").date().isoformat()
+                                }
+                                
+                                for field in fields:
+                                    if field_data.hasElement(field):
+                                        element = field_data.getElement(field)
+                                        if element.datatype() == blpapi.DataType.FLOAT64:
+                                            point[field] = element.getValueAsFloat()
+                                        elif element.datatype() == blpapi.DataType.INT32:
+                                            point[field] = element.getValueAsInteger()
+                                        elif element.datatype() == blpapi.DataType.INT64:
+                                            point[field] = element.getValueAsInteger()
+                                        else:
+                                            point[field] = element.getValueAsString()
+                                    else:
+                                        point[field] = None
+                                
+                                data_points.append(point)
                             
-                            data_points.append(point)
-                        
-                        results[security] = data_points
+                            results[security] = data_points
+                        else:
+                            # No data available
+                            results[security] = []
                 
                 if event.eventType() == blpapi.Event.RESPONSE:
                     break
@@ -244,79 +237,14 @@ class BloombergConnection:
             logger.error(f"Error fetching historical data: {e}")
             raise HTTPException(status_code=500, detail=str(e))
     
-    def _generate_mock_historical_data(self, securities, fields, start_date, end_date):
-        """Generate realistic mock data for testing"""
-        results = {}
-        
-        # Base prices for different security types
-        base_prices = {
-            "AAPL US Equity": 150.0,
-            "MSFT US Equity": 350.0,
-            "LMCADY Index": 8500.0,
-            "HG1 Comdty": 4.2,
-            "JPY Curncy": 145.0,
-            "EUR Curncy": 1.08
-        }
-        
-        for security in securities:
-            # Determine base price
-            base_price = base_prices.get(security, 100.0)
-            if "Equity" in security:
-                base_price = base_prices.get(security, 100.0)
-            elif "Index" in security:
-                base_price = base_prices.get(security, 5000.0)
-            elif "Comdty" in security:
-                base_price = base_prices.get(security, 3.0)
-            elif "Curncy" in security:
-                base_price = base_prices.get(security, 1.0)
-            
-            # Generate date range
-            date_range = pd.date_range(start=start_date, end=end_date, freq='B')  # Business days
-            
-            # Generate price path
-            returns = np.random.normal(0.0002, config.MOCK_DATA_VARIANCE, len(date_range))
-            price_path = base_price * np.exp(np.cumsum(returns))
-            
-            # Generate data points
-            data_points = []
-            for i, d in enumerate(date_range):
-                point = {"date": d.date().isoformat()}
-                
-                for field in fields:
-                    if field == "PX_LAST" or field == "LAST_PRICE":
-                        point[field] = round(price_path[i], 2)
-                    elif field == "PX_OPEN":
-                        point[field] = round(price_path[i] * (1 + np.random.uniform(-0.005, 0.005)), 2)
-                    elif field == "PX_HIGH":
-                        point[field] = round(price_path[i] * (1 + np.random.uniform(0, 0.01)), 2)
-                    elif field == "PX_LOW":
-                        point[field] = round(price_path[i] * (1 - np.random.uniform(0, 0.01)), 2)
-                    elif field == "VOLUME":
-                        base_volume = 10000000 if "Equity" in security else 100000
-                        point[field] = int(base_volume * np.random.uniform(0.5, 1.5))
-                    elif field == "OPEN_INT":
-                        point[field] = int(50000 * np.random.uniform(0.8, 1.2))
-                    else:
-                        point[field] = None
-                
-                data_points.append(point)
-            
-            results[security] = data_points
-        
-        return {"status": "success", "data": results, "is_mock": True}
-    
     def get_reference_data(self, securities, fields):
-        """Get reference data from Bloomberg or mock"""
+        """Get reference data from Bloomberg"""
         cache_key = f"ref_{json.dumps(securities)}_{json.dumps(fields)}"
         cached_data = cache.get(cache_key)
         if cached_data:
             return cached_data
         
-        if self.is_mock:
-            data = self._generate_mock_reference_data(securities, fields)
-        else:
-            data = self._fetch_reference_data(securities, fields)
-        
+        data = self._fetch_reference_data(securities, fields)
         cache.set(cache_key, data)
         return data
     
@@ -344,23 +272,35 @@ class BloombergConnection:
                         for i in range(security_data_array.numValues()):
                             security_data = security_data_array.getValue(i)
                             security = security_data.getElementAsString("security")
-                            field_data = security_data.getElement("fieldData")
                             
-                            data = {}
-                            for field in fields:
-                                if field_data.hasElement(field):
-                                    element = field_data.getElement(field)
-                                    # Handle different data types
-                                    if element.datatype() == blpapi.DataType.FLOAT64:
-                                        data[field] = element.getValueAsFloat()
-                                    elif element.datatype() == blpapi.DataType.INT32:
-                                        data[field] = element.getValueAsInteger()
+                            if security_data.hasElement("fieldData"):
+                                field_data = security_data.getElement("fieldData")
+                                
+                                data = {}
+                                for field in fields:
+                                    if field_data.hasElement(field):
+                                        element = field_data.getElement(field)
+                                        # Handle different data types
+                                        if element.datatype() == blpapi.DataType.FLOAT64:
+                                            data[field] = element.getValueAsFloat()
+                                        elif element.datatype() == blpapi.DataType.INT32:
+                                            data[field] = element.getValueAsInteger()
+                                        elif element.datatype() == blpapi.DataType.INT64:
+                                            data[field] = element.getValueAsInteger()
+                                        elif element.datatype() == blpapi.DataType.STRING:
+                                            data[field] = element.getValueAsString()
+                                        elif element.datatype() == blpapi.DataType.DATE:
+                                            data[field] = element.getValueAsDatetime().date().isoformat()
+                                        elif element.datatype() == blpapi.DataType.DATETIME:
+                                            data[field] = element.getValueAsDatetime().isoformat()
+                                        else:
+                                            data[field] = str(element.getValue())
                                     else:
-                                        data[field] = element.getValueAsString()
-                                else:
-                                    data[field] = None
-                            
-                            results[security] = data
+                                        data[field] = None
+                                
+                                results[security] = data
+                            else:
+                                results[security] = {field: None for field in fields}
                 
                 if event.eventType() == blpapi.Event.RESPONSE:
                     break
@@ -370,39 +310,55 @@ class BloombergConnection:
         except Exception as e:
             logger.error(f"Error fetching reference data: {e}")
             raise HTTPException(status_code=500, detail=str(e))
-    
-    def _generate_mock_reference_data(self, securities, fields):
-        """Generate mock reference data"""
-        results = {}
-        
-        for security in securities:
-            data = {}
-            for field in fields:
-                if field == "NAME":
-                    data[field] = security.split()[0] + " Corporation"
-                elif field == "COUNTRY":
-                    data[field] = "US"
-                elif field == "CURRENCY":
-                    data[field] = "USD"
-                elif field == "EXCHANGE":
-                    data[field] = "NYSE"
-                elif field == "INDUSTRY_SECTOR":
-                    data[field] = "Technology"
-                elif field == "PX_LAST":
-                    data[field] = round(random.uniform(50, 500), 2)
-                elif field == "CUR_MKT_CAP":
-                    data[field] = round(random.uniform(100, 2000) * 1e9, 0)
-                elif field == "PE_RATIO":
-                    data[field] = round(random.uniform(15, 35), 2)
-                else:
-                    data[field] = f"Mock {field}"
+
+    def get_intraday_data(self, security, start_datetime, end_datetime, interval):
+        """Get intraday bar data from Bloomberg"""
+        try:
+            request = self.service.createRequest("IntradayBarRequest")
             
-            results[security] = data
-        
-        return {"status": "success", "data": results, "is_mock": True}
+            request.set("security", security)
+            request.set("eventType", "TRADE")
+            request.set("interval", interval)
+            request.set("startDateTime", start_datetime)
+            request.set("endDateTime", end_datetime)
+            
+            self.session.sendRequest(request)
+            
+            data_points = []
+            while True:
+                event = self.session.nextEvent(config.BLOOMBERG_TIMEOUT_MS)
+                
+                for msg in event:
+                    if msg.hasElement("barData"):
+                        bar_data = msg.getElement("barData").getElement("barTickData")
+                        
+                        for i in range(bar_data.numValues()):
+                            bar = bar_data.getValue(i)
+                            data_points.append({
+                                "time": bar.getElementAsDatetime("time").isoformat(),
+                                "open": bar.getElementAsFloat("open"),
+                                "high": bar.getElementAsFloat("high"),
+                                "low": bar.getElementAsFloat("low"),
+                                "close": bar.getElementAsFloat("close"),
+                                "volume": bar.getElementAsInteger("volume"),
+                                "numEvents": bar.getElementAsInteger("numEvents")
+                            })
+                
+                if event.eventType() == blpapi.Event.RESPONSE:
+                    break
+            
+            return {"status": "success", "data": {security: data_points}}
+            
+        except Exception as e:
+            logger.error(f"Error fetching intraday data: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 # Initialize Bloomberg connection
-bloomberg = BloombergConnection()
+try:
+    bloomberg = BloombergConnection()
+except Exception as e:
+    logger.error(f"Failed to initialize Bloomberg connection: {e}")
+    bloomberg = None
 
 # API authentication
 async def verify_api_key(api_key: str = Header(...)):
@@ -418,8 +374,8 @@ async def root():
     return {
         "service": "Bloomberg API Bridge",
         "version": "1.0.0",
-        "status": "running",
-        "mode": "mock" if bloomberg.is_mock else "live",
+        "status": "running" if bloomberg else "error",
+        "bloomberg_connected": bloomberg is not None,
         "endpoints": [
             "/health",
             "/historical_data",
@@ -431,13 +387,9 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    bbcomm_running = bloomberg._check_bbcomm_running() if BLOOMBERG_AVAILABLE else False
-    
     return {
-        "status": "healthy",
-        "bloomberg_available": BLOOMBERG_AVAILABLE,
-        "bbcomm_running": bbcomm_running,
-        "mode": "mock" if bloomberg.is_mock else "live",
+        "status": "healthy" if bloomberg else "unhealthy",
+        "bloomberg_connected": bloomberg is not None,
         "timestamp": datetime.now().isoformat(),
         "cache_size": len(cache.cache)
     }
@@ -448,6 +400,9 @@ async def get_historical_data(
     api_key: str = Depends(verify_api_key)
 ):
     """Get historical market data"""
+    if not bloomberg:
+        raise HTTPException(status_code=503, detail="Bloomberg connection not available")
+        
     logger.info(f"Historical data request: {request.securities} from {request.start_date} to {request.end_date}")
     
     try:
@@ -484,6 +439,9 @@ async def get_reference_data(
     api_key: str = Depends(verify_api_key)
 ):
     """Get reference/static data"""
+    if not bloomberg:
+        raise HTTPException(status_code=503, detail="Bloomberg connection not available")
+        
     logger.info(f"Reference data request: {request.securities}")
     
     try:
@@ -505,44 +463,41 @@ async def get_intraday_data(
     request: IntradayDataRequest,
     api_key: str = Depends(verify_api_key)
 ):
-    """Get intraday data (mock only for now)"""
+    """Get intraday bar data"""
+    if not bloomberg:
+        raise HTTPException(status_code=503, detail="Bloomberg connection not available")
+        
     logger.info(f"Intraday data request: {request.security}")
     
-    # For now, return mock data
-    # Real implementation would use IntradayBarRequest
-    
-    time_range = pd.date_range(
-        start=request.start_datetime,
-        end=request.end_datetime,
-        freq=f'{request.interval}T'
-    )
-    
-    base_price = 100.0
-    data_points = []
-    
-    for timestamp in time_range:
-        price = base_price * (1 + random.uniform(-0.001, 0.001))
-        data_points.append({
-            "time": timestamp.isoformat(),
-            "open": round(price, 2),
-            "high": round(price * 1.001, 2),
-            "low": round(price * 0.999, 2),
-            "close": round(price * (1 + random.uniform(-0.0005, 0.0005)), 2),
-            "volume": random.randint(1000, 10000)
-        })
-    
-    return {
-        "status": "success",
-        "data": {request.security: data_points},
-        "is_mock": True
-    }
+    try:
+        result = bloomberg.get_intraday_data(
+            request.security,
+            request.start_datetime,
+            request.end_datetime,
+            request.interval
+        )
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in intraday_data endpoint: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Run the server
 if __name__ == "__main__":
     import uvicorn
     
+    if not bloomberg:
+        logger.error("Cannot start server - Bloomberg connection failed")
+        logger.error("Please ensure:")
+        logger.error("1. Bloomberg Terminal is running")
+        logger.error("2. You are logged in to Bloomberg")
+        logger.error("3. blpapi is installed: pip install blpapi")
+        exit(1)
+    
     logger.info(f"Starting Bloomberg API Bridge on {config.API_HOST}:{config.API_PORT}")
-    logger.info(f"Mode: {'Mock' if bloomberg.is_mock else 'Live'}")
     
     uvicorn.run(
         app,
