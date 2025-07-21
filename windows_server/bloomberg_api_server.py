@@ -204,7 +204,7 @@ class BloombergConnection:
                             for i in range(field_data_array.numValues()):
                                 field_data = field_data_array.getValue(i)
                                 point = {
-                                    "date": field_data.getElementAsDatetime("date").date().isoformat()
+                                    "date": field_data.getElementAsDatetime("date").isoformat()
                                 }
                                 
                                 for field in fields:
@@ -290,7 +290,7 @@ class BloombergConnection:
                                         elif element.datatype() == blpapi.DataType.STRING:
                                             data[field] = element.getValueAsString()
                                         elif element.datatype() == blpapi.DataType.DATE:
-                                            data[field] = element.getValueAsDatetime().date().isoformat()
+                                            data[field] = element.getValueAsDatetime().isoformat()
                                         elif element.datatype() == blpapi.DataType.DATETIME:
                                             data[field] = element.getValueAsDatetime().isoformat()
                                         else:

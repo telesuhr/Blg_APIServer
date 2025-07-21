@@ -23,8 +23,7 @@ def main():
         print("1. Checking connection...")
         health = client.check_connection()
         print(f"   ✓ Server status: {health['status']}")
-        print(f"   ✓ Mode: {health['mode']}")
-        print(f"   ✓ Bloomberg available: {health['bloomberg_available']}")
+        print(f"   ✓ Bloomberg connected: {health['bloomberg_connected']}")
         print()
         
         # Test reference data
@@ -47,9 +46,8 @@ def main():
         
         print("✅ All tests passed! Bloomberg API Bridge is working.")
         
-        if health.get('is_mock') or health['mode'] == 'mock':
-            print("\n⚠️  Note: Server is running in MOCK MODE")
-            print("   To use real Bloomberg data, ensure Bloomberg Terminal is running on the Windows PC")
+        if health.get('bloomberg_connected'):
+            print("\n✅ Connected to Bloomberg Terminal - Using real market data!")
         
     except Exception as e:
         print(f"❌ Error: {e}")
